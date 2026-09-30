@@ -34,9 +34,20 @@ import {
 } from './capability-gates.ts'
 import type { CapabilityGateOutcome, CapabilityRowId } from './status.ts'
 
+import {
+  createAccountPool,
+  extractSummaryFromQuotaView,
+  type AccountPoolConfig,
+  type AccountPoolItem,
+  type AccountPoolManager,
+  type AccountPoolStatusView,
+} from './account-pool.ts'
+
 export interface AntigravityAuthServiceOptions {
   readonly store?: AntigravityAuthStore
   readonly storePath?: string
+  readonly pool?: AccountPoolManager
+  readonly poolPath?: string
   readonly flowOptions?: Omit<OAuthFlowOptions, 'commit' | 'validateProject'>
   /** Inject a complete private transport only for deterministic Host tests. */
   readonly projectOptions?: ProjectDiscoveryOptions
@@ -45,6 +56,7 @@ export interface AntigravityAuthServiceOptions {
   readonly gates?: CapabilityGateRegistry
   readonly gatePath?: string
   readonly autoActivateGates?: boolean
+  readonly startScheduler?: boolean
 }
 
 export type { HostCredential } from './credential-coordinator.ts'
@@ -56,6 +68,7 @@ export class AntigravityAuthService implements BootstrapStatusService {
   private readonly quota: QuotaService
   private readonly gates: CapabilityGateRegistry
   private readonly autoActivate: boolean
+  private readonly pool: AccountPoolManager
   private riskAcknowledged = false
   private activeFlowGeneration = 0
   private disposed = false
@@ -84,6 +97,20 @@ export class AntigravityAuthService implements BootstrapStatusService {
       validateProject: (accessToken, signal) => projectDiscovery.discover(accessToken, signal),
       commit: (token, project, signal) => this.commitCredential(token, project, signal),
     })
+    this.pool = options.pool ?? createAccountPool({
+      store: this.store,
+      ...(options.storePath !== undefined ? { storePath: options.storePath } : {}),
+      ...(options.poolPath !== undefined ? { poolPath: options.poolPath } : {}),
+      isMemory: options.store !== undefined && options.storePath === undefined,
+      ...(options.credentialOptions?.fetchImpl !== undefined ? { fetchImpl: options.credentialOptions.fetchImpl } : {}),
+      ...(options.quotaOptions?.transport !== undefined ? { transport: options.quotaOptions.transport } : {}),
+      onActiveAccountChange: async (account) => {
+        await this.syncActiveAccount(account)
+      },
+    })
+    if (options.startScheduler === true) {
+      this.pool.startScheduler()
+    }
   }
 
   async status(): Promise<AntigravityStatusView> {
@@ -188,7 +215,108 @@ export class AntigravityAuthService implements BootstrapStatusService {
   }
 
   async usage(signal?: AbortSignal, force = false): Promise<import('./quota.ts').QuotaStatusView> {
-    return await this.quota.refresh(signal, force)
+    const quotaView = await this.quota.refresh(signal, force)
+    if (quotaView.state === 'available') {
+      const summary = extractSummaryFromQuotaView(quotaView, Date.now())
+      const active = await this.pool.getActiveAccount()
+      if (active) {
+        active.quota = summary
+        const config = this.pool.getConfig()
+        if (config.autoSwitch && summary.remainingFraction <= config.quotaThreshold) {
+          void this.checkQuotas(false).catch(() => {})
+        }
+      }
+    }
+    return quotaView
+  }
+
+  getAccountPool(): AccountPoolManager {
+    return this.pool
+  }
+
+  async poolStatus(): Promise<AccountPoolStatusView> {
+    return await this.pool.statusView()
+  }
+
+  async switchAccount(id: string): Promise<AccountPoolItem | undefined> {
+    const switched = await this.pool.switchAccount(id, 'user-switch')
+    if (switched) {
+      await this.syncActiveAccount(switched)
+    }
+    return switched
+  }
+
+  async removeAccount(id: string): Promise<boolean> {
+    const activeBefore = await this.pool.getActiveAccount()
+    const removed = await this.pool.removeAccount(id)
+    if (removed && activeBefore?.id === id) {
+      const activeAfter = await this.pool.getActiveAccount()
+      if (activeAfter) {
+        await this.syncActiveAccount(activeAfter)
+      } else {
+        await this.credentials.logout()
+        await this.gates.clear()
+        this.notifyStatus()
+      }
+    }
+    return removed
+  }
+
+  async updatePoolConfig(config: Partial<AccountPoolConfig>): Promise<AccountPoolConfig> {
+    return await this.pool.updateConfig(config)
+  }
+
+  async checkQuotas(forceAll = false): Promise<{
+    readonly switched: boolean
+    readonly previousAccountId?: string
+    readonly currentAccountId?: string
+    readonly reason?: string
+  }> {
+    const result = await this.pool.checkQuotasAndAutoSwitch(forceAll)
+    if (result.switched && result.currentAccountId) {
+      const active = await this.pool.getActiveAccount()
+      if (active) {
+        await this.syncActiveAccount(active)
+      }
+    }
+    return result
+  }
+
+  async switchToNextAccount(): Promise<boolean> {
+    const res = await this.checkQuotas(true)
+    if (res.switched) return true
+    const accounts = await this.pool.getAccounts()
+    const active = await this.pool.getActiveAccount()
+    if (accounts.length <= 1) return false
+    const currentIndex = active ? accounts.findIndex(a => a.id === active.id) : -1
+    const nextIndex = (currentIndex + 1) % accounts.length
+    const nextAccount = accounts[nextIndex]
+    if (nextAccount && nextAccount.id !== active?.id) {
+      await this.switchAccount(nextAccount.id)
+      return true
+    }
+    return false
+  }
+
+  startScheduler(): void {
+    this.pool.startScheduler()
+  }
+
+  stopScheduler(): void {
+    this.pool.stopScheduler()
+  }
+
+  async preflightQuotaCheck(): Promise<boolean> {
+    const config = this.pool.getConfig()
+    if (!config.autoSwitch) return false
+    const accounts = await this.pool.getAccounts()
+    if (accounts.length <= 1) return false
+    const active = await this.pool.getActiveAccount()
+    if (!active) return false
+    if (active.quota && active.quota.remainingFraction <= config.quotaThreshold) {
+      return await this.switchToNextAccount()
+    }
+    return false
   }
 
   async logout(): Promise<import('./credential-coordinator.ts').LogoutResult> {
@@ -196,6 +324,17 @@ export class AntigravityAuthService implements BootstrapStatusService {
     this.activeFlowGeneration = 0
     await this.flow.cancel()
     try {
+      const active = await this.pool.getActiveAccount()
+      if (active) {
+        await this.pool.removeAccount(active.id)
+      }
+      const remaining = await this.pool.getAccounts()
+      if (remaining.length > 0) {
+        const nextActive = remaining[0]!
+        await this.pool.switchAccount(nextActive.id, 'logout-fallback')
+        await this.syncActiveAccount(nextActive)
+        return { state: 'logged-out' }
+      }
       const result = await this.credentials.logout()
       await this.gates.clear()
       this.notifyStatus()
@@ -208,7 +347,13 @@ export class AntigravityAuthService implements BootstrapStatusService {
   async revoke(confirmed: boolean, signal?: AbortSignal): Promise<import('./credential-coordinator.ts').RevokeActionResult> {
     if (this.disposed) throw new OAuthFlowError('internal', 'The Antigravity login is unavailable')
     const result = await this.credentials.revoke(confirmed, signal)
-    if (result.state === 'revoked' || result.state === 'logged-out' || result.state === 'superseded') await this.gates.clear()
+    if (result.state === 'revoked' || result.state === 'logged-out' || result.state === 'superseded') {
+      const active = await this.pool.getActiveAccount()
+      if (active) {
+        await this.pool.removeAccount(active.id)
+      }
+      await this.gates.clear()
+    }
     this.notifyStatus()
     return result
   }
@@ -218,7 +363,28 @@ export class AntigravityAuthService implements BootstrapStatusService {
     this.disposed = true
     this.activeFlowGeneration = 0
     this.statusListeners.clear()
-    await Promise.all([this.flow.dispose(), this.credentials.dispose(), this.quota.dispose()])
+    await Promise.all([this.flow.dispose(), this.credentials.dispose(), this.quota.dispose(), this.pool.dispose()])
+  }
+
+  async syncActiveAccount(account: AccountPoolItem): Promise<void> {
+    const current = await this.readRecord()
+    if (current && current.refreshToken === account.refreshToken && current.projectId === account.projectId) {
+      return
+    }
+    const committed = await this.store.commit({
+      refreshToken: account.refreshToken,
+      projectId: account.projectId,
+      ...(account.email ? { email: account.email } : {}),
+      ...(account.lineage ? { lineage: account.lineage } : {}),
+    })
+    if (this.autoActivate) {
+      const subject = committed.lineage ?? 'legacy-account'
+      await this.autoActivateGates(subject)
+    }
+    try {
+      await this.credentials.credential(undefined, { forceRefresh: true })
+    } catch {}
+    this.notifyStatus()
   }
 
   private async commitCredential(token: OAuthToken, project: ProjectValidation, signal: AbortSignal): Promise<void> {
@@ -238,6 +404,13 @@ export class AntigravityAuthService implements BootstrapStatusService {
     }
     const committed = await this.store.compareAndCommit(current?.revision ?? 0, draft, current?.lineage)
     if (committed === undefined) throw new OAuthFlowError('credential-conflict', 'The login changed while it was completing')
+    await this.pool.addOrUpdateAccount({
+      refreshToken: token.refreshToken,
+      projectId: project.projectId,
+      ...(email === undefined ? {} : { email }),
+      ...(committed.lineage === undefined ? {} : { lineage: committed.lineage }),
+    })
+    this.pool.startScheduler()
     if (this.autoActivate) {
       const subject = committed.lineage ?? 'legacy-account'
       await this.autoActivateGates(subject)

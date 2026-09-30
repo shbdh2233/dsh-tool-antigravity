@@ -24,6 +24,11 @@ import {
 import { isSafeRpcErrorCode, safeRpcErrorMessage } from './rpc-vocabulary.ts'
 import { isBoundedSafeText } from './safe-text.ts'
 
+import type {
+  AccountPoolConfig,
+  AccountPoolStatusView,
+} from './account-pool.ts'
+
 export const ANTIGRAVITY_AUTH_RPC_CHANNEL = '/api'
 export const ANTIGRAVITY_AUTH_RPC_NAMESPACE = 'antigravity-auth' as const
 
@@ -38,6 +43,11 @@ export interface AntigravityAuthRpcClient {
   usage?(signal?: AbortSignal, force?: boolean): Promise<RpcResult<QuotaStatusView>>
   getProxy(signal?: AbortSignal): Promise<RpcResult<{ proxy: string }>>
   setProxy(proxy: string, signal?: AbortSignal): Promise<RpcResult<{ proxy: string }>>
+  getAccounts?(signal?: AbortSignal): Promise<RpcResult<{ pool: AccountPoolStatusView }>>
+  switchAccount?(id: string, signal?: AbortSignal): Promise<RpcResult<{ activeAccountId: string; switched: boolean }>>
+  removeAccount?(id: string, signal?: AbortSignal): Promise<RpcResult<{ removed: boolean }>>
+  setPoolConfig?(config: Partial<AccountPoolConfig>, signal?: AbortSignal): Promise<RpcResult<{ config: AccountPoolConfig }>>
+  checkPoolQuotas?(forceAll?: boolean, signal?: AbortSignal): Promise<RpcResult<{ pool?: AccountPoolStatusView; switched: boolean; reason?: string }>>
 }
 
 export interface AntigravityAuthConnectionRpc {
@@ -65,7 +75,17 @@ export function createAntigravityAuthRpcClient(rpc: AntigravityAuthConnectionRpc
     usage: (signal, force = false) => callValidated(rpc, 'usage', { force }, signal, parseUsageResult),
     getProxy: signal => callValidated(rpc, 'get-proxy', {}, signal, value => (isRecord(value) ? value as { proxy: string } : undefined)),
     setProxy: (proxy, signal) => callValidated(rpc, 'set-proxy', { proxy }, signal, value => (isRecord(value) ? value as { proxy: string } : undefined)),
+    getAccounts: signal => callValidated(rpc, 'accounts', {}, signal, parsePoolResult),
+    switchAccount: (id, signal) => callValidated(rpc, 'switch-account', { id }, signal, value => (isRecord(value) ? value as { activeAccountId: string; switched: boolean } : undefined)),
+    removeAccount: (id, signal) => callValidated(rpc, 'remove-account', { id }, signal, value => (isRecord(value) ? value as { removed: boolean } : undefined)),
+    setPoolConfig: (config, signal) => callValidated(rpc, 'set-pool-config', config, signal, value => (isRecord(value) ? value as { config: AccountPoolConfig } : undefined)),
+    checkPoolQuotas: (forceAll, signal) => callValidated(rpc, 'check-pool-quotas', { forceAll: Boolean(forceAll) }, signal, value => (isRecord(value) ? value as { pool?: AccountPoolStatusView; switched: boolean; reason?: string } : undefined)),
   }
+}
+
+export function parsePoolResult(value: unknown): { pool: AccountPoolStatusView } | undefined {
+  if (!isRecord(value) || !isRecord(value.pool)) return undefined
+  return { pool: value.pool as unknown as AccountPoolStatusView }
 }
 
 async function callValidated<T>(

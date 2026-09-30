@@ -1,6 +1,6 @@
 {
   "name": "dsh-tool-antigravity",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "High-performance, streamlined Antigravity OAuth LLM routing and Nano Banana 2 image generation capability bundle for DeepSeek Harness",
   "type": "module",
   "engines": {
@@ -79,6 +79,11 @@
       "types": "./lib/types/media-admission.d.ts",
       "import": "./lib/media-admission.js",
       "default": "./lib/media-admission.js"
+    },
+    "./account-pool": {
+      "types": "./lib/types/account-pool.d.ts",
+      "import": "./lib/account-pool.js",
+      "default": "./lib/account-pool.js"
     },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"

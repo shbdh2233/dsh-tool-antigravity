@@ -21,6 +21,7 @@ export default defineConfig([
       'src/media-admission.ts',
       'src/live-gates.ts',
       'src/live-gate-runner.ts',
+      'src/account-pool.ts',
     ],
     outDir: 'lib',
     format: ['esm'],

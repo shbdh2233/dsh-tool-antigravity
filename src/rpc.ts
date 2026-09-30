@@ -10,9 +10,26 @@ import type { AntigravityModelCatalogService } from './model-catalog.ts'
 import { getStoredProxy, setStoredProxy, applyProxySetting } from './proxy-config.ts'
 export { ANTIGRAVITY_AUTH_RPC_CHANNEL, ANTIGRAVITY_AUTH_RPC_NAMESPACE } from './rpc-contract.ts'
 
+export type AntigravityAuthRpcService = Pick<
+  BootstrapStatusService,
+  'status' | 'acknowledgeRisk' | 'startLogin' | 'cancelLogin' | 'logout' | 'revoke'
+> & {
+  usage?: (signal?: AbortSignal, force?: boolean) => Promise<QuotaStatusView>
+  poolStatus?: () => Promise<import('./account-pool.ts').AccountPoolStatusView>
+  switchAccount?: (id: string) => Promise<import('./account-pool.ts').AccountPoolItem | undefined>
+  removeAccount?: (id: string) => Promise<boolean>
+  updatePoolConfig?: (config: Partial<import('./account-pool.ts').AccountPoolConfig>) => Promise<import('./account-pool.ts').AccountPoolConfig>
+  checkQuotas?: (forceAll?: boolean) => Promise<{
+    readonly switched: boolean
+    readonly previousAccountId?: string
+    readonly currentAccountId?: string
+    readonly reason?: string
+  }>
+}
+
 /** Dispatch closed, value-safe requests; callback URLs are never echoed. */
 export async function handleAntigravityAuthRpc(
-  service: Pick<BootstrapStatusService, 'status' | 'acknowledgeRisk' | 'startLogin' | 'cancelLogin' | 'logout' | 'revoke'> & { usage?: (signal?: AbortSignal, force?: boolean) => Promise<QuotaStatusView> },
+  service: AntigravityAuthRpcService,
   endpoint: string,
   payload: unknown,
   signal?: AbortSignal,
@@ -68,6 +85,46 @@ export async function handleAntigravityAuthRpc(
       setStoredProxy(proxy)
       applyProxySetting(proxy)
       return { ok: true, value: { proxy } }
+    }
+    if (endpoint === 'accounts') {
+      if (!isEmptyRecord(payload)) return badRequest('accounts expects an empty payload')
+      if (service.poolStatus === undefined) {
+        return { ok: true, value: { pool: { accounts: [], config: { autoSwitch: true, quotaThreshold: 0.1, checkIntervalSeconds: 120 } } } }
+      }
+      return { ok: true, value: { pool: await service.poolStatus() } }
+    }
+    if (endpoint === 'switch-account') {
+      if (!isRecord(payload) || typeof payload.id !== 'string' || !payload.id.trim()) {
+        return badRequest('switch-account expects { id: string }')
+      }
+      if (service.switchAccount === undefined) return badRequest('pool is unavailable')
+      const target = await service.switchAccount(payload.id.trim())
+      return { ok: true, value: { activeAccountId: target?.id ?? payload.id, switched: target !== undefined } }
+    }
+    if (endpoint === 'remove-account') {
+      if (!isRecord(payload) || typeof payload.id !== 'string' || !payload.id.trim()) {
+        return badRequest('remove-account expects { id: string }')
+      }
+      if (service.removeAccount === undefined) return badRequest('pool is unavailable')
+      const removed = await service.removeAccount(payload.id.trim())
+      return { ok: true, value: { removed } }
+    }
+    if (endpoint === 'set-pool-config') {
+      if (!isRecord(payload)) return badRequest('set-pool-config expects an object')
+      if (service.updatePoolConfig === undefined) return badRequest('pool is unavailable')
+      const patch: Record<string, unknown> = {}
+      if (typeof payload.autoSwitch === 'boolean') patch.autoSwitch = payload.autoSwitch
+      if (typeof payload.quotaThreshold === 'number') patch.quotaThreshold = payload.quotaThreshold
+      if (typeof payload.checkIntervalSeconds === 'number') patch.checkIntervalSeconds = payload.checkIntervalSeconds
+      const config = await service.updatePoolConfig(patch)
+      return { ok: true, value: { config } }
+    }
+    if (endpoint === 'check-pool-quotas') {
+      const forceAll = isRecord(payload) && typeof payload.forceAll === 'boolean' ? payload.forceAll : false
+      if (service.checkQuotas === undefined) return { ok: true, value: { switched: false } }
+      const res = await service.checkQuotas(forceAll)
+      const pool = service.poolStatus ? await service.poolStatus() : undefined
+      return { ok: true, value: { pool, switched: res.switched, reason: res.reason } }
     }
     return badRequest('unknown Antigravity auth endpoint')
   } catch (error) {

@@ -8,7 +8,17 @@ import type { AntigravityStatusView } from './status.ts'
 type AuthCommandService = Pick<
   AntigravityAuthService,
   'status' | 'acknowledgeRisk' | 'startLogin' | 'cancelLogin' | 'logout'
->
+> & {
+  poolStatus?: () => Promise<import('./account-pool.ts').AccountPoolStatusView>
+  switchAccount?: (id: string) => Promise<import('./account-pool.ts').AccountPoolItem | undefined>
+  removeAccount?: (id: string) => Promise<boolean>
+  checkQuotas?: (forceAll?: boolean) => Promise<{
+    readonly switched: boolean
+    readonly previousAccountId?: string
+    readonly currentAccountId?: string
+    readonly reason?: string
+  }>
+}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -114,6 +124,65 @@ export function createAntigravityAuthCommand(
           return { kind: 'success', text: 'Antigravity logged out.' }
         } catch (error) {
           return { kind: 'error', text: `logging out of Antigravity failed: ${errorMessage(error)}` }
+        }
+      }
+      if (operation === 'accounts' || operation === 'pool') {
+        try {
+          if (!service.poolStatus) return { kind: 'error', text: 'Account pool is not available.' }
+          const pool = await service.poolStatus()
+          if (pool.accounts.length === 0) {
+            return { kind: 'success', text: 'Account pool is empty. Use /antigravity-auth login to add an account.' }
+          }
+          const lines = pool.accounts.map((acc, index) => {
+            const badge = acc.isActive ? '[Active]' : '[Standby]'
+            const quota = acc.quota
+              ? `Quota: ${(acc.quota.remainingFraction * 100).toFixed(1)}%`
+              : 'Quota: unknown'
+            return `${index + 1}. ${badge} ${acc.email ?? 'No Email'} (${acc.id}) - ${quota}`
+          })
+          const autoSwitchDesc = pool.config.autoSwitch
+            ? `Enabled (auto-switch when quota <= ${(pool.config.quotaThreshold * 100).toFixed(0)}%, interval: ${pool.config.checkIntervalSeconds}s)`
+            : 'Disabled'
+          return {
+            kind: 'success',
+            text: `Antigravity Account Pool (${pool.accounts.length} accounts):\n${lines.join('\n')}\nAuto-switch: ${autoSwitchDesc}`,
+          }
+        } catch (error) {
+          return { kind: 'error', text: `reading account pool failed: ${errorMessage(error)}` }
+        }
+      }
+      if (operation.startsWith('switch ') || operation.startsWith('use ')) {
+        const id = operation.replace(/^(switch|use)\s+/u, '').trim()
+        try {
+          if (!service.switchAccount) return { kind: 'error', text: 'Account switching is not available.' }
+          const switched = await service.switchAccount(id)
+          if (!switched) return { kind: 'error', text: `Account "${id}" not found in pool.` }
+          return { kind: 'success', text: `Switched active account to: ${switched.email ?? switched.id}` }
+        } catch (error) {
+          return { kind: 'error', text: `switching account failed: ${errorMessage(error)}` }
+        }
+      }
+      if (operation.startsWith('remove ')) {
+        const id = operation.replace(/^remove\s+/u, '').trim()
+        try {
+          if (!service.removeAccount) return { kind: 'error', text: 'Account removal is not available.' }
+          const removed = await service.removeAccount(id)
+          if (!removed) return { kind: 'error', text: `Account "${id}" not found in pool.` }
+          return { kind: 'success', text: `Removed account "${id}" from pool.` }
+        } catch (error) {
+          return { kind: 'error', text: `removing account failed: ${errorMessage(error)}` }
+        }
+      }
+      if (operation === 'check-quotas' || operation === 'check-quota') {
+        try {
+          if (!service.checkQuotas) return { kind: 'error', text: 'Quota checking is not available.' }
+          const result = await service.checkQuotas(true)
+          if (result.switched) {
+            return { kind: 'success', text: `Quotas checked. ${result.reason ?? 'Account automatically switched.'}` }
+          }
+          return { kind: 'success', text: 'Quotas checked for all accounts in pool. Active account remains unchanged.' }
+        } catch (error) {
+          return { kind: 'error', text: `checking quotas failed: ${errorMessage(error)}` }
         }
       }
       return { kind: 'error', text: `unknown operation "${operation}" (available: status, login, cancel, logout)` }

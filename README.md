@@ -5,7 +5,7 @@ English | [中文](README.zh.md)
 [![npm version](https://img.shields.io/npm/v/dsh-tool-antigravity.svg?color=blue)](https://www.npmjs.com/package/dsh-tool-antigravity)
 [![license](https://img.shields.io/github/license/Jaylor-Wang/dsh-tool-antigravity.svg)](LICENSE)
 [![GitHub release](https://img.shields.io/github/v/release/Jaylor-Wang/dsh-tool-antigravity.svg)](https://github.com/Jaylor-Wang/dsh-tool-antigravity/releases)
-[![Tests](https://img.shields.io/badge/tests-28%20suites%20%7C%20272%20passed-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-29%20suites%20%7C%20281%20passed-brightgreen.svg)](tests/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-Strict%20Types-blue.svg)](tsconfig.json)
 
 High-performance, streamlined Antigravity capability bundle plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH).
@@ -14,10 +14,10 @@ Provides private Google OAuth 2.0 PKCE authentication, multi-model LLM routing (
 
 ---
 
-## Highlights in v0.2.6 (Unlocked DSH Peer Range)
+## Highlights in v0.2.7
 
-- **DSH peer unlocked to `*`**: All `@deepseek-ai/dsh-*` peerDependencies now use `*`, matching `dsh-tool-lsp`. The dshmarket card shows `DSH *` and DSH 0.2.0-rc.2 no longer needs an exact-version exemption.
-- **Retains v0.2.5 runtime work**: `configForms` injection, sidebar settings registration, visual proxy settings, and end-to-end proxy routing remain in place.
+- **Multi-Account Pool & Scheduled Quota Auto-Switch**: Connect multiple Google accounts at once, monitor 5-hour and weekly quota windows in the background, and switch automatically to the next account when the active one drops below 10% or hits a `429`. See [Features §4](#4-multi-account-pool--scheduled-quota-auto-switch).
+- **Retains all v0.2.6 work**: The DSH peer range stays unlocked to `*`, and `configForms` injection, sidebar settings registration, visual proxy settings, and end-to-end proxy routing remain in place.
 ## Features
 
 ### 1. High-Performance Core Architecture
@@ -43,6 +43,12 @@ Provides private Google OAuth 2.0 PKCE authentication, multi-model LLM routing (
 - **`generate_image`**: Prompt-based image creation and iterative image-to-image editing powered by Nano Banana 2 (`gemini-3.1-flash-image`) using session references.
 - **`list_images`**: Inspect and retrieve generated image attachments within the current session.
 - Fully integrated with DSH `AttachmentStore` and `FileSystem` with TOCTOU path escape protection without polluting chat context with raw base64 payloads.
+
+### 4. Multi-Account Pool & Scheduled Quota Auto-Switch
+- **Simultaneous Multi-Account Management**: Connect multiple Google accounts simultaneously with isolated credential persistence. Switch between accounts seamlessly without logging out.
+- **Scheduled Quota Monitoring**: Background daemon periodically inspects 5-hour and weekly quota windows for the active account.
+- **Auto-Switch on Low Quota (<10%)**: Automatically switches to the next account with available quota when the active account's quota drops below 10% or hits a 429 rate limit.
+- **Interactive UI & Commands**: Manage accounts directly in the Web UI Account Pool card or via terminal slash commands (`/antigravity-auth accounts`, `switch`, `remove`, `check-quotas`).
 
 ---
 
@@ -81,7 +87,11 @@ Add the plugin entries to your `cordis.patch.yml` or DSH config file:
 ### Slash Commands
 Manage authentication directly from the DSH terminal / chat prompt:
 
-- `/antigravity-auth login`: Initiates Google OAuth 2.0 PKCE login and launches your default browser.
+- `/antigravity-auth login`: Initiates Google OAuth 2.0 PKCE login and launches your default browser (can be run multiple times to add accounts).
+- `/antigravity-auth accounts`: View all accounts in the pool, active indicator, and remaining quotas.
+- `/antigravity-auth switch <id>`: Switch active account to a specific account.
+- `/antigravity-auth remove <id>`: Remove an account from the pool.
+- `/antigravity-auth check-quotas`: Manually check all quotas across accounts and trigger auto-switch if low.
 - `/antigravity-auth status`: Check current authentication state, masked email, and project id.
 - `/antigravity-auth logout`: Discard credentials and revoke tokens.
 - `/antigravity-auth cancel`: Abort an ongoing login attempt.

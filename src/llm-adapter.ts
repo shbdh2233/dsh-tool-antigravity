@@ -74,6 +74,8 @@ const MAX_PROVIDER_PARTS = 4096
 
 export interface AntigravityAuthCredentialSource {
   credential(signal?: AbortSignal, options?: { readonly forceRefresh?: boolean }): Promise<HostCredential | undefined>
+  switchToNextAccount?: () => Promise<boolean>
+  preflightQuotaCheck?: () => Promise<boolean>
 }
 
 export interface AntigravityAdapterOptions {
@@ -249,6 +251,12 @@ export class AntigravityAdapter extends LlmAdapter {
     let replayed = false
     let retriedNetwork = false
     for (;;) {
+      if (!replayed && !hasEmitted.value && !isAborted(signal) && typeof (this.adapterOptions.auth as AntigravityAuthCredentialSource).preflightQuotaCheck === 'function') {
+        const switched = await (this.adapterOptions.auth as AntigravityAuthCredentialSource).preflightQuotaCheck!()
+        if (switched) {
+          replayed = true
+        }
+      }
       const credential = await this.readCredential(signal, replayed)
       if (credential === undefined) {
         throw new LlmError('Antigravity login is required before model use', 'AUTH')
@@ -285,6 +293,14 @@ export class AntigravityAdapter extends LlmAdapter {
           await cancelResponse(response)
           replayed = true
           continue
+        }
+        if (response.status === 429 && !hasEmitted.value && !isAborted(signal) && typeof (this.adapterOptions.auth as AntigravityAuthCredentialSource).switchToNextAccount === 'function') {
+          const switched = await (this.adapterOptions.auth as AntigravityAuthCredentialSource).switchToNextAccount!()
+          if (switched) {
+            await cancelResponse(response)
+            replayed = true
+            continue
+          }
         }
         if ((response.status === 502 || response.status === 503 || response.status === 504) && !retriedNetwork && !hasEmitted.value && !isAborted(signal)) {
           await cancelResponse(response)

@@ -69,7 +69,11 @@ export function apply(ctx: Context, config: AntigravityAuthConfig = {}): void {
     return registerAccountRoutes(
       connectionCtx.connection,
       ANTIGRAVITY_AUTH_RPC_NAMESPACE,
-      ['status', 'models', 'usage', 'acknowledge-risk', 'login', 'cancel', 'cancel-login', 'logout', 'revoke', 'get-proxy', 'set-proxy'],
+      [
+        'status', 'models', 'usage', 'acknowledge-risk', 'login', 'cancel',
+        'cancel-login', 'logout', 'revoke', 'get-proxy', 'set-proxy',
+        'accounts', 'switch-account', 'remove-account', 'set-pool-config', 'check-pool-quotas',
+      ],
       guard.handler,
     )
   })
@@ -82,7 +86,9 @@ export function apply(ctx: Context, config: AntigravityAuthConfig = {}): void {
       if (runtime.llm?.registerAdapter === undefined) return undefined
       if (runtime.llm.listProviders?.().some(provider => provider.id === ANTIGRAVITY_PROVIDER)) return undefined
       const dispose = runtime.llm.registerAdapter([ANTIGRAVITY_PROVIDER], adapter)
+      service.startScheduler()
       return () => {
+        service.stopScheduler()
         try { dispose() } finally { adapter.invalidateModelCatalog() }
       }
     },
@@ -108,3 +114,4 @@ export * from './model-catalog.ts'
 export * from './capability-gates.ts'
 export * from './live-gates.ts'
 export * from './proxy-config.ts'
+export * from './account-pool.ts'

@@ -5,7 +5,7 @@
 [![npm version](https://img.shields.io/npm/v/dsh-tool-antigravity.svg?color=blue)](https://www.npmjs.com/package/dsh-tool-antigravity)
 [![license](https://img.shields.io/github/license/Jaylor-Wang/dsh-tool-antigravity.svg)](LICENSE)
 [![GitHub release](https://img.shields.io/github/v/release/Jaylor-Wang/dsh-tool-antigravity.svg)](https://github.com/Jaylor-Wang/dsh-tool-antigravity/releases)
-[![Tests](https://img.shields.io/badge/tests-28%20suites%20%7C%20272%20passed-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-29%20suites%20%7C%20281%20passed-brightgreen.svg)](tests/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-Strict%20Types-blue.svg)](tsconfig.json)
 
 为 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) 打造的高性能 Antigravity 核心能力包插件。
@@ -14,10 +14,10 @@
 
 ---
 
-## v0.2.6 版本重要更新 (解锁 DSH 运行时 peer)
+## v0.2.7 版本重要更新
 
-- **DSH peer 改为 `*`**：所有 `@deepseek-ai/dsh-*` peerDependencies 从 `^0.1.5-rc.1` 放宽为 `*`，与 `dsh-tool-lsp` 一致。dshmarket 卡片显示 `DSH *`，DSH 0.2.0-rc.2 不再需要精确版本豁免。
-- **保留 v0.2.5 运行时改动**：`configForms` 注入、侧边栏设置挂载、可视化代理设置与全链路代理路由均保留。
+- **多号池与额度定时检测自动切换**：支持多个 Google 账号同时登录，后台周期性检测 5 小时与每周配额，当前账号额度降至 10% 以下或遇到 `429` 时自动切换到下一个账号。详见 [核心特性 §4](#4-多号池与额度定时检测自动切换-multi-account-pool--quota-auto-switch)。
+- **完整保留 v0.2.6 改动**：DSH 运行时 peer 维持 `*` 解锁策略，`configForms` 注入、侧边栏设置挂载、可视化代理设置与全链路代理路由均保持不变。
 ## 核心特性与架构设计
 
 ### 1. 高性能底层架构
@@ -43,6 +43,12 @@
 - **`generate_image`**：依托 Nano Banana 2（`gemini-3.1-flash-image`）原生多模态能力，支持基于自然语言提示词的图像生成，以及基于会话图片的图生图/多轮编辑。
 - **`list_images`**：供智能体检索当前会话中生成的图片附件。
 - 深度接入 DSH `AttachmentStore` 与 `FileSystem`，结合 TOCTOU 防穿越路径准入，杜绝将大量 Base64 直接回灌进对话上下文。
+
+### 4. 多号池与额度定时检测自动切换 (Multi-Account Pool & Quota Auto-Switch)
+- **多账号同时登录与管理**：支持多个 Google 账号安全并存，各账号凭证持久化隔离，不再发生新登录覆盖老账号的问题。在 Web 设置面板可直观查看号池列表、各账号当前激活状态（当前使用 Active / 备用 Standby）与脱敏邮箱。
+- **额度定时检测守护**：后台守护进程周期性（默认每 2 分钟）自动轮询检测当前活跃账号的 5 小时与每周配额使用情况。
+- **低额度（<10%）自动切号**：当检测到当前正在使用的账号剩余额度降至 10% 以下（或遇到 429 配额耗尽）时，系统自动无缝切换到号池中额度充足的下一个账号，保证推理生成绝不中断。
+- **灵活的手动调度**：支持在 Web 前端或终端命令一键切换账号、移除指定账号、立即刷新全部账号额度，或自由开启/关闭自动切号策略。
 
 ---
 
@@ -81,7 +87,11 @@ pnpm add dsh-tool-antigravity
 ### 终端斜杠命令 (Slash Commands)
 在 DSH 命令行或交互输入框中可直接使用：
 
-- `/antigravity-auth login`：启动 Google OAuth 2.0 PKCE 登录流程并自动唤起默认浏览器。
+- `/antigravity-auth login`：启动 Google OAuth 2.0 PKCE 登录流程并自动唤起默认浏览器（可多次执行以添加多个账号）。
+- `/antigravity-auth accounts`：查看当前多号池中的所有账号列表、当前活跃账号与各账号额度。
+- `/antigravity-auth switch <id>`：切换当前正在使用的活跃账号。
+- `/antigravity-auth remove <id>`：从多号池中移除指定账号。
+- `/antigravity-auth check-quotas`：立即检测号池中所有账号的配额并执行自动轮换判断。
 - `/antigravity-auth status`：查看当前账号登录状态、脱敏邮箱与 Project ID。
 - `/antigravity-auth logout`：注销当前登录凭证并吊销 Token。
 - `/antigravity-auth cancel`：取消正在进行的登录操作。

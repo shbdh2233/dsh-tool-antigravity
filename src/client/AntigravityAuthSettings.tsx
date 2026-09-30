@@ -7,6 +7,7 @@ import type { AntigravityAuthRpcClient } from '../rpc-contract.ts'
 import type { QuotaStatusView } from '../quota.ts'
 import type { AntigravityImageSettings } from '../image.ts'
 import type { RevokeState } from '../credential-coordinator.ts'
+import type { AccountPoolStatusView } from '../account-pool.ts'
 import type {
   AntigravityStatusView,
   CapabilityRowId,
@@ -57,6 +58,9 @@ export function AntigravityAuthSettings({ rpc, t, subscribe, imageScope }: Antig
   const [proxyInput, setProxyInput] = useState('')
   const [proxySaving, setProxySaving] = useState(false)
   const [proxyMessage, setProxyMessage] = useState('')
+  const [pool, setPool] = useState<AccountPoolStatusView | null>(null)
+  const [poolBusy, setPoolBusy] = useState(false)
+  const [poolMessage, setPoolMessage] = useState<string | null>(null)
   const [resetTick, setResetTick] = useState(0)
   const statusGeneration = useRef(0)
   const quotaGeneration = useRef(0)
@@ -249,6 +253,81 @@ export function AntigravityAuthSettings({ rpc, t, subscribe, imageScope }: Antig
     }
   }, [load, rpc, t, unmountSignal])
 
+  const loadPool = useCallback(async (signal?: AbortSignal) => {
+    if (rpc.getAccounts === undefined) return
+    try {
+      const res = await rpc.getAccounts(signal)
+      if (res.ok && res.value?.pool) {
+        setPool(res.value.pool)
+      }
+    } catch {}
+  }, [rpc])
+
+  useEffect(() => {
+    if (status?.login.configured === true) {
+      void loadPool(unmountSignal())
+    }
+  }, [status?.login.configured, loadPool, unmountSignal, resetTick])
+
+  const onSwitchAccount = async (id: string): Promise<void> => {
+    if (!rpc.switchAccount) return
+    setPoolBusy(true)
+    try {
+      const res = await rpc.switchAccount(id, unmountSignal())
+      if (res.ok) {
+        setPoolMessage(t('switchedAccountSuccess'))
+        await Promise.all([load(unmountSignal(), true), loadPool(unmountSignal()), loadQuota(true, unmountSignal())])
+      }
+      setTimeout(() => setPoolMessage(null), 3000)
+    } finally {
+      setPoolBusy(false)
+    }
+  }
+
+  const onRemoveAccount = async (id: string): Promise<void> => {
+    if (!rpc.removeAccount) return
+    setPoolBusy(true)
+    try {
+      const res = await rpc.removeAccount(id, unmountSignal())
+      if (res.ok) {
+        setPoolMessage(t('removedAccountSuccess'))
+        await Promise.all([load(unmountSignal(), true), loadPool(unmountSignal()), loadQuota(true, unmountSignal())])
+      }
+      setTimeout(() => setPoolMessage(null), 3000)
+    } finally {
+      setPoolBusy(false)
+    }
+  }
+
+  const onToggleAutoSwitch = async (enabled: boolean): Promise<void> => {
+    if (!rpc.setPoolConfig) return
+    try {
+      const res = await rpc.setPoolConfig({ autoSwitch: enabled }, unmountSignal())
+      if (res.ok) {
+        await loadPool(unmountSignal())
+      }
+    } catch {}
+  }
+
+  const onCheckAllQuotas = async (): Promise<void> => {
+    if (!rpc.checkPoolQuotas) return
+    setPoolBusy(true)
+    try {
+      const res = await rpc.checkPoolQuotas(true, unmountSignal())
+      if (res.ok) {
+        if (res.value?.switched) {
+          setPoolMessage(res.value.reason || t('switchedAccountSuccess'))
+          await Promise.all([load(unmountSignal(), true), loadPool(unmountSignal()), loadQuota(true, unmountSignal())])
+        } else {
+          await loadPool(unmountSignal())
+        }
+      }
+      setTimeout(() => setPoolMessage(null), 4000)
+    } finally {
+      setPoolBusy(false)
+    }
+  }
+
   const projectError = projectErrorText(status?.login.errorCode, t)
   const isConfigured = status?.login.configured === true
 
@@ -334,6 +413,118 @@ export function AntigravityAuthSettings({ rpc, t, subscribe, imageScope }: Antig
             <p className="agy-card-subtext" role="status">{revokeStatusText(status.revoke.state, t)}</p>
           )}
         </article>
+
+        {/* Card 2: Account Pool & Quota Auto-Switch (rendered when configured) */}
+        {isConfigured ? (
+          <article className="agy-card" aria-labelledby="antigravity-pool-card-title">
+            <div className="agy-card-header">
+              <div className="agy-card-identity">
+                <h2 id="antigravity-pool-card-title" className="agy-card-title">{t('poolCardTitle')}</h2>
+                <p className="agy-card-intro">{t('poolCardIntro')}</p>
+              </div>
+            </div>
+
+            <div className="agy-pool-list">
+              {pool && pool.accounts.length > 0 ? (
+                pool.accounts.map(acc => {
+                  return (
+                    <div key={acc.id} className="agy-pool-item" data-active={acc.isActive}>
+                      <div className="agy-pool-item-meta">
+                        <span className="agy-pool-badge" data-active={acc.isActive}>
+                          {acc.isActive ? t('activeAccountBadge') : t('standbyAccountBadge')}
+                        </span>
+                        <span className="agy-pool-item-email">{acc.email || acc.id}</span>
+                      </div>
+                      {acc.quota ? (
+                        <div className="agy-pool-item-quota">
+                          {acc.quota.windowWeeklyFraction !== undefined ? (
+                            <QuotaRing
+                              label={t('poolQuotaWeekly')}
+                              fraction={acc.quota.windowWeeklyFraction}
+                              tone={quotaTone(acc.quota.windowWeeklyFraction)}
+                            />
+                          ) : null}
+                          {acc.quota.window5hFraction !== undefined ? (
+                            <QuotaRing
+                              label={t('poolQuota5h')}
+                              fraction={acc.quota.window5hFraction}
+                              tone={quotaTone(acc.quota.window5hFraction)}
+                            />
+                          ) : null}
+                        </div>
+                      ) : null}
+                      <div className="agy-pool-item-actions">
+                        {!acc.isActive ? (
+                          <button
+                            className="agy-btn agy-btn-outline"
+                            type="button"
+                            disabled={poolBusy}
+                            onClick={() => { void onSwitchAccount(acc.id) }}
+                            style={{ padding: '3px 8px', fontSize: '12px' }}
+                          >
+                            {t('switchAccount')}
+                          </button>
+                        ) : null}
+                        <button
+                          className="agy-btn agy-btn-ghost"
+                          type="button"
+                          disabled={poolBusy}
+                          onClick={() => { void onRemoveAccount(acc.id) }}
+                          style={{ padding: '3px 8px', fontSize: '12px', color: '#ef4444' }}
+                        >
+                          {t('removeAccount')}
+                        </button>
+                      </div>
+                    </div>
+                  )
+                })
+              ) : (
+                <p className="agy-card-subtext">{t('noAccountsInPool')}</p>
+              )}
+            </div>
+
+            <div className="agy-pool-toggle-row">
+              <div>
+                <span style={{ fontWeight: 500, color: 'var(--dsw-alias-label-primary, #e6edf3)' }}>
+                  {t('autoSwitchToggle')}
+                </span>
+                <p style={{ margin: '2px 0 0', fontSize: '12px', color: 'var(--dsw-alias-label-tertiary, #8b949e)' }}>
+                  {t('autoSwitchActive')}
+                </p>
+              </div>
+              <Switch
+                label={t('autoSwitchToggle')}
+                checked={pool?.config?.autoSwitch ?? true}
+                onChange={next => { void onToggleAutoSwitch(next) }}
+              />
+            </div>
+
+            <div className="agy-action-row" style={{ marginTop: '4px' }}>
+              <button
+                className="agy-btn agy-btn-outline"
+                type="button"
+                disabled={loginBusy || poolBusy}
+                onClick={() => { void startLogin() }}
+              >
+                {t('addAccount')}
+              </button>
+              <button
+                className="agy-btn agy-btn-outline"
+                type="button"
+                disabled={poolBusy}
+                onClick={() => { void onCheckAllQuotas() }}
+              >
+                {poolBusy ? t('checkingQuotas') : t('checkAllQuotas')}
+              </button>
+            </div>
+
+            {poolMessage ? (
+              <p className="agy-card-subtext" style={{ color: '#10b981', margin: '2px 0 0' }}>
+                {poolMessage}
+              </p>
+            ) : null}
+          </article>
+        ) : null}
 
         {/* Card 2: Network Proxy */}
         <article className="agy-card">
@@ -428,6 +619,51 @@ function Switch({
       />
       <span className="agy-switch-slider" />
     </label>
+  )
+}
+
+function QuotaRing({
+  label,
+  fraction,
+  tone,
+}: {
+  readonly label: string
+  readonly fraction: number
+  readonly tone: 'normal' | 'warning' | 'error'
+}): ReactNode {
+  const radius = 13
+  const strokeWidth = 3
+  const circumference = 2 * Math.PI * radius
+  const validFraction = Math.max(0, Math.min(1, Number.isFinite(fraction) ? fraction : 0))
+  const offset = circumference * (1 - validFraction)
+  const pct = Math.round(validFraction * 100)
+
+  return (
+    <div className="agy-pool-ring-group" title={`${label}: ${(validFraction * 100).toFixed(1)}%`}>
+      <span className="agy-pool-ring-label">{label}</span>
+      <div className="agy-pool-ring-wrapper">
+        <svg className="agy-pool-ring-svg" viewBox="0 0 32 32">
+          <circle
+            className="agy-pool-ring-bg"
+            cx="16"
+            cy="16"
+            r={radius}
+            strokeWidth={strokeWidth}
+          />
+          <circle
+            className="agy-pool-ring-fg"
+            data-tone={tone}
+            cx="16"
+            cy="16"
+            r={radius}
+            strokeWidth={strokeWidth}
+            strokeDasharray={circumference}
+            strokeDashoffset={offset}
+          />
+        </svg>
+      </div>
+      <span className="agy-pool-ring-pct" data-tone={tone}>{pct}%</span>
+    </div>
   )
 }
 
